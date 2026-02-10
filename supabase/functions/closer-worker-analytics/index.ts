@@ -447,8 +447,16 @@ bot.on('message:text', async (ctx) => {
         await setAwaitingAction(chat_id, 'report', 'report_description', formData);
         await ctx.reply(
           '✅ Дата збережена!\n\n' +
-          '📝 Крок 2/4: Опишіть виконану роботу\n' +
-          'Детально розкажіть, що було зроблено.',
+          '📝 Крок 2/3: опиши, будь ласка, виконану за день роботу.\n\n' +
+          'Можеш орієнтуватися на таку структуру:\n' +
+          '1. Активні діалоги — (кількість)\n' +
+          '2. Активні діалоги — (від 3-х днів спілкування)\n' +
+          '3. Прогріви — (скільки було, на що)\n' +
+          '4. Вброси — (скільки було)\n' +
+          '5. Індикаторні вброси — (скільки було)\n' +
+          '6. Нові контакти — (скільки, з якого джерела)\n' +
+          '7. Пропозиції — (згода / відмова — чому)\n' +
+          '8. Фільтрація — (кількість контактів в архіві)',
           { reply_markup: keyboard }
         );
         return;
@@ -457,35 +465,33 @@ bot.on('message:text', async (ctx) => {
         await setAwaitingAction(chat_id, 'report', 'report_results', formData);
         await ctx.reply(
           '✅ Опис збережено!\n\n' +
-          '📊 Крок 3/4: Опишіть результати\n' +
-          'Які результати були досягнуті?',
+          '📊 Крок 3/3: надішли, будь ласка, скріншоти з результатами.\n\n' +
+          'Можеш відправити кілька фото або документів підряд — кожен скрін буде автоматично збережено та надіслано клоузеру.',
           { reply_markup: keyboard }
         );
         return;
       } else if (currentStep === 'report_results') {
+        // Третій (останній) крок: результати (та, за потреби, проблеми в тому ж полі)
         formData.results = text.trim();
-        await setAwaitingAction(chat_id, 'report', 'report_problems', formData);
-        await ctx.reply(
-          '✅ Результати збережено!\n\n' +
-          '⚠️ Крок 4/4: Проблеми та зауваження (необов\'язково)\n' +
-          'Якщо були проблеми, опишіть їх. Якщо нічого - напишіть "Немає" або "-"',
-          { reply_markup: keyboard }
-        );
-        return;
-      } else if (currentStep === 'report_problems') {
-        formData.problems = text.trim();
+        formData.problems = formData.problems || 'Немає';
         
-        // Формуємо фінальний текст звіту
-        const reportText = 
+        // Короткий текст для збереження в БД (тільки пункти 1 і 2)
+        const dbReportText =
           `📅 Дата: ${formData.date}\n\n` +
-          `📝 Виконана робота:\n${formData.description}\n\n` +
-          `📊 Результати:\n${formData.results}\n\n` +
-          `⚠️ Проблеми та зауваження:\n${formData.problems === 'Немає' || formData.problems === '-' ? 'Відсутні' : formData.problems}`;
+          `📝 Виконана робота:\n${formData.description}`;
+
+        // Повний текст (з результатами та проблемами) можна використати для відправки клоузеру
+        const fullReportText =
+          dbReportText +
+          `\n\n📊 Результати:\n${formData.results}\n\n` +
+          `⚠️ Проблеми та зауваження:\n${
+            formData.problems === 'Немає' || formData.problems === '-' ? 'Відсутні' : formData.problems
+          }`;
 
         const reportData: any = {
           worker_chat_id: chat_id,
           closer_chat_id: worker.ref_id,
-          message_text: reportText,
+          message_text: dbReportText,
           message_type: 'text',
           status: 'unread'
           // id не вказуємо - PostgreSQL автоматично згенерує його (BIGSERIAL)
@@ -517,7 +523,11 @@ bot.on('message:text', async (ctx) => {
         console.error('[TEXT_HANDLER] Error hint:', insertError.hint);
         console.error('[TEXT_HANDLER] Full error:', insertError);
         await setAwaitingAction(chat_id, null);
-        await ctx.reply(`❌ Помилка при збереженні звіту: ${insertError.message || insertError.code || 'Unknown error'}\n\nДеталі: ${JSON.stringify(insertError)}`);
+        await ctx.reply(
+          `❌ Помилка при збереженні звіту: ${insertError.message || insertError.code || 'Unknown error'}\n\nДеталі: ${JSON.stringify(
+            insertError
+          )}`
+        );
         return;
       }
 
@@ -531,13 +541,41 @@ bot.on('message:text', async (ctx) => {
       }
 
         console.log('[TEXT_HANDLER] Worker report saved successfully. Report ID:', report.id);
+
+        // Якщо в formData є медіа — створюємо окремі записи для кожного файлу
+        const mediaItems = Array.isArray(formData?.media) ? formData.media : [];
+        if (mediaItems.length > 0) {
+          try {
+            const mediaReports = mediaItems
+              .filter((m: any) => m && m.file_id && m.type)
+              .map((m: any) => ({
+                worker_chat_id: chat_id,
+                closer_chat_id: worker.ref_id,
+                message_text: dbReportText,
+                message_type: m.type,
+                file_id: m.file_id,
+                status: 'unread'
+              }));
+
+            if (mediaReports.length > 0) {
+              console.log('[TEXT_HANDLER] Saving media reports for worker:', chat_id, 'count:', mediaReports.length);
+              const { error: mediaError } = await supabase.from('worker_reports').insert(mediaReports);
+              if (mediaError) {
+                console.error('[TEXT_HANDLER] Error saving media reports:', mediaError);
+              }
+            }
+          } catch (mediaErr) {
+            console.error('[TEXT_HANDLER] Unexpected error while saving media reports:', mediaErr);
+          }
+        }
+
         await clearFormData(chat_id);
 
-        // Відправляємо звіт клоузеру
+        // Відправляємо звіт клоузеру (повний текст, включно з результатами та проблемами)
         try {
           const workerName = `@${worker.username || worker.first_name || 'Unknown'}`;
           const reportDate = new Date(report.created_at).toLocaleString('uk-UA');
-          const closerMessage = `📋 Новий звіт від воркера ${workerName}\n📅 ${reportDate}\n\n${reportText}`;
+          const closerMessage = `📋 Новий звіт від воркера ${workerName}\n📅 ${reportDate}\n\n${fullReportText}`;
           
           console.log('[TEXT_HANDLER] Sending text message to closer:', worker.ref_id);
           const sendResult = await bot.api.sendMessage(worker.ref_id, closerMessage);
@@ -560,7 +598,7 @@ bot.on('message:text', async (ctx) => {
         await setAwaitingAction(chat_id, 'report', 'report_date', {});
         await ctx.reply(
           '📝 Заповніть форму звіту.\n\n' +
-          '📅 Крок 1/4: Вкажіть дату та час роботи\n' +
+          '📅 Крок 1/3: Вкажіть дату та час роботи\n' +
           'Наприклад: 15.12.2024, 10:00-18:00\n' +
           'Або просто: Сьогодні',
           { reply_markup: keyboard }
@@ -818,7 +856,7 @@ bot.on('message:text', async (ctx) => {
         const keyboard = new InlineKeyboard().text('❌ Скасувати', 'cancel_report');
         await ctx.reply(
           '📝 Заповніть форму звіту.\n\n' +
-          '📅 Крок 1/4: Вкажіть дату та час роботи\n' +
+          '📅 Крок 1/3: Вкажіть дату та час роботи\n' +
           'Наприклад: 15.12.2024, 10:00-18:00\n' +
           'Або просто: Сьогодні',
           { reply_markup: keyboard }
@@ -907,7 +945,32 @@ bot.on('message', async (ctx) => {
         return;
       }
 
-      // Зберігаємо звіт в базу
+      // Замість збереження в worker_reports одразу — акумулюємо медіа у form_data,
+      // щоб пізніше створити записи з повним текстом (пункти 1–2).
+      const safeCaption = messageText?.trim?.() || '';
+
+      const mediaItem = {
+        type: messageType,
+        file_id: fileId,
+        caption: safeCaption
+      };
+
+      const formData = await getFormData(chat_id);
+      const existingMedia = Array.isArray(formData?.media) ? formData.media : [];
+      const updatedFormData = {
+        ...formData,
+        media: [...existingMedia, mediaItem]
+      };
+
+      console.log('[MESSAGE] Added media item to form_data. Total media count:', updatedFormData.media.length);
+
+      const currentStep = await getFormStep(chat_id);
+      await setAwaitingAction(chat_id, 'report', currentStep || 'report_results', updatedFormData);
+
+      await ctx.reply('✅ Скрін збережено до звіту. Можеш надіслати ще або написати наступний текстовий крок.');
+      return;
+
+      // Зберігаємо звіт в базу (СТАРА ЛОГІКА – тепер не використовується, залишено як fallback)
       // Переконаємося, що message_text не порожній
       if (!messageText || messageText.trim().length === 0) {
         messageText = messageType === 'photo' ? '(Фото без підпису)' : 
