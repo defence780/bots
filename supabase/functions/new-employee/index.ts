@@ -27,7 +27,7 @@ bot.command("start", async (ctx) => {
 
     // Якщо заявки немає, створюємо нову
     if (!existingApplication) {
-      await supabase
+      const { error: insertError } = await supabase
         .from('new-employee')
         .insert({
           chat_id: chat_id,
@@ -35,10 +35,14 @@ bot.command("start", async (ctx) => {
           first_name: ctx.message.chat.first_name,
           isDone: false
         });
+      
+      if (insertError) {
+        console.error('Error creating new employee application:', insertError);
+      }
     }
 
     // Зберігаємо повідомлення в new-employee-messages
-    await supabase
+    const { data: insertedData, error: messageError } = await supabase
       .from('new-employee-messages')
       .insert({
         chat_id: chat_id,
@@ -46,9 +50,17 @@ bot.command("start", async (ctx) => {
         to: String(chat_id),
         message: welcomeMessage,
         step: 'waiting'
-      });
+      })
+      .select();
+    
+    if (messageError) {
+      console.error('Error saving welcome message:', messageError);
+      console.error('Error details:', JSON.stringify(messageError, null, 2));
+    } else {
+      console.log('Welcome message saved successfully:', insertedData);
+    }
   } catch (error) {
-    console.error('Error saving welcome message:', error);
+    console.error('Error in /start command:', error);
   }
 });
 
@@ -80,7 +92,7 @@ bot.on("message:text", async (ctx) => {
     
     // Зберігаємо повідомлення від бота до користувача
     try {
-      await supabase
+      const { data: insertedData, error: messageError } = await supabase
         .from('new-employee-messages')
         .insert({
           chat_id: chat_id,
@@ -88,9 +100,17 @@ bot.on("message:text", async (ctx) => {
           to: String(chat_id),
           message: firstMessage,
           step: 'waiting'
-        });
+        })
+        .select();
+      
+      if (messageError) {
+        console.error('Error saving bot message:', messageError);
+        console.error('Error details:', JSON.stringify(messageError, null, 2));
+      } else {
+        console.log('Bot message saved successfully:', insertedData);
+      }
     } catch (error) {
-      console.error('Error saving bot message:', error);
+      console.error('Error in "Далее" handler:', error);
     }
     
     return;
@@ -107,17 +127,25 @@ bot.on("message:text", async (ctx) => {
     
     // Зберігаємо повідомлення від бота
     try {
-      await supabase
+      const { data: insertedData, error: messageError } = await supabase
         .from('new-employee-messages')
         .insert({
           chat_id: chat_id,
           from: 'bot',
           to: String(chat_id),
           message: successMessage,
-          step: 'done'
-        });
+          step: 'waiting'
+        })
+        .select();
+      
+      if (messageError) {
+        console.error('Error saving success message:', messageError);
+        console.error('Error details:', JSON.stringify(messageError, null, 2));
+      } else {
+        console.log('Success message saved successfully:', insertedData);
+      }
     } catch (error) {
-      console.error('Error saving success message:', error);
+      console.error('Error in "Подать заявку" handler:', error);
     }
     
     return;
@@ -126,17 +154,21 @@ bot.on("message:text", async (ctx) => {
   // Обробка відповіді користувача
   try {
     // Перевіряємо, чи вже є повідомлення з step = 'done' для цього користувача
-    const { data: existingRecords } = await supabase
+    const { data: existingRecords, error: selectError } = await supabase
       .from('new-employee-messages')
       .select('step')
       .eq('chat_id', chat_id)
       .eq('step', 'done')
       .limit(1);
 
+    if (selectError) {
+      console.error('Error checking existing records:', selectError);
+    }
+
     const isDone = existingRecords && existingRecords.length > 0;
 
     // Зберігаємо повідомлення від користувача до бота
-    await supabase
+    const { data: insertedData, error: insertError } = await supabase
       .from('new-employee-messages')
       .insert({
         chat_id: chat_id,
@@ -144,16 +176,28 @@ bot.on("message:text", async (ctx) => {
         to: 'bot',
         message: message,
         step: isDone ? 'done' : 'waiting'
-      });
+      })
+      .select();
+
+    if (insertError) {
+      console.error('Error saving user message:', insertError);
+      console.error('Error details:', JSON.stringify(insertError, null, 2));
+    } else {
+      console.log('User message saved successfully:', insertedData);
+    }
 
     // Якщо step ще не 'done', встановлюємо його в 'done' після першої відповіді
     if (!isDone) {
       // Оновлюємо всі повідомлення для цього користувача, встановлюючи step = 'done'
-      await supabase
+      const { error: updateError } = await supabase
         .from('new-employee-messages')
         .update({ step: 'done' })
         .eq('chat_id', chat_id)
         .eq('step', 'waiting');
+
+      if (updateError) {
+        console.error('Error updating messages step:', updateError);
+      }
 
       // Відправка другого повідомлення після першої відповіді
       const secondMessage = `Коротко о работе:
@@ -174,7 +218,7 @@ bot.on("message:text", async (ctx) => {
       });
 
       // Зберігаємо друге повідомлення від бота
-      await supabase
+      const { data: insertedSecondData, error: secondMessageError } = await supabase
         .from('new-employee-messages')
         .insert({
           chat_id: chat_id,
@@ -182,7 +226,15 @@ bot.on("message:text", async (ctx) => {
           to: String(chat_id),
           message: secondMessage,
           step: 'done'
-        });
+        })
+        .select();
+
+      if (secondMessageError) {
+        console.error('Error saving second bot message:', secondMessageError);
+        console.error('Error details:', JSON.stringify(secondMessageError, null, 2));
+      } else {
+        console.log('Second bot message saved successfully:', insertedSecondData);
+      }
     }
   } catch (error) {
     console.error('Error processing message:', error);
