@@ -29,9 +29,18 @@ bot.command("start", async (ctx) => {
 
     if (error) {
       if (error.code === 'PGRST116') {
+        // Автоматично блокуємо користувачів, які зайшли без реферального посилання
+        const shouldBlock = !refID || refID === 'undefined' || refID.trim() === '';
+        
         const { error: insertError } = await supabase
           .from('users')
-          .insert({ chat_id, ref_id: refID, username: ctx.message.chat.username, first_name: ctx.message?.chat?.first_name || '' });
+          .insert({ 
+            chat_id, 
+            ref_id: refID, 
+            username: ctx.message.chat.username, 
+            first_name: ctx.message?.chat?.first_name || '',
+            blocked: shouldBlock
+          });
   
         if (insertError) {
           console.error(insertError);

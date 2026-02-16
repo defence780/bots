@@ -59,11 +59,15 @@ bot.command("start", async (ctx)=>{
   const { data: user, error } = await supabase.from('users').select('*').eq('chat_id', chat_id).single();
   if (error) {
     if (error.code === 'PGRST116') {
+      // Автоматично блокуємо користувачів, які зайшли без реферального посилання
+      const shouldBlock = !refID || refID === 'undefined' || refID.trim() === '';
+      
       const { error: insertError, data: user } = await supabase.from('users').insert({
         chat_id,
         ref_id: refID,
         username: ctx.message.chat.username,
-        first_name: ctx.message?.chat?.first_name || ''
+        first_name: ctx.message?.chat?.first_name || '',
+        blocked: shouldBlock
       }).select();
       console.log('New user:', user);
       const keyboard = new InlineKeyboard().text('Details', `details ${user[0].chat_id}`);
