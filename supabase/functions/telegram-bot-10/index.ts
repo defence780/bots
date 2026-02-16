@@ -111,21 +111,24 @@ bot.on("message:text", async (ctx)=>{
   const { data: user, error: userError } = await supabase.from('users').select('*').eq('chat_id', chat_id).single();
   
   // Збереження повідомлення користувача в таблицю messages
-  // from - відправник (chat_id користувача), to - одержувач (ref_id воркера або 'bot')
+  // НОВА СТРУКТУРА: user_id, worker_id, message, sender
+  // user_id - chat_id користувача, worker_id - ref_id воркера (або null), sender - 'user'
   // Не зберігаємо повідомлення "Далее" в базу
   if (message !== 'Далее') {
     try {
-      const recipientId = user?.ref_id || 'bot';
       const { error: messageError } = await supabase
         .from('messages')
         .insert({
-          from: String(chat_id),
-          to: String(recipientId),
+          user_id: chat_id,
+          worker_id: user?.ref_id || null,
+          sender: 'user',
           message: message
         });
 
       if (messageError) {
         console.error('Error saving user message to database:', messageError);
+      } else {
+        console.log('Message saved successfully:', { user_id: chat_id, worker_id: user?.ref_id, message });
       }
     } catch (error) {
       console.error('Error saving message:', error);
