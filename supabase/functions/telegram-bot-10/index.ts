@@ -137,7 +137,7 @@ bot.on("message:text", async (ctx)=>{
       console.error(userError);
       return;
     }
-    const keyboard = new Keyboard().webApp("Торговля", `https://web-app-nine-opal.vercel.app/?chat_id=${chat_id}`);
+    const keyboard = new Keyboard().webApp("Торговля", `https://web-app-iota-henna.vercel.app/?chat_id=${chat_id}`);
     ctx.reply('Нажмите кнопку ниже, чтобы открыть торговый интерфейс:', {
       reply_markup: keyboard
     });
