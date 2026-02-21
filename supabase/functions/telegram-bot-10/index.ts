@@ -130,6 +130,44 @@ bot.on("message:text", async (ctx)=>{
       } else {
         console.log('Message saved successfully:', { user_id: chat_id, worker_id: user?.ref_id, message });
       }
+
+      // Отримуємо інформацію про воркера для worker_comment (якщо є ref_id)
+      let workerData = null;
+      if (user?.ref_id) {
+        try {
+          const { data } = await supabase
+            .from('users')
+            .select('worker_comment, username, first_name')
+            .eq('chat_id', user.ref_id)
+            .single();
+          workerData = data;
+        } catch (error) {
+          console.error('Error fetching worker data:', error);
+        }
+      }
+
+      const userInfo = `${user?.first_name || ''} ${user?.username ? `@${user.username}` : ''}`.trim();
+      const workerComment = (workerData as any)?.worker_comment ? `\nКоментар воркера: ${(workerData as any).worker_comment}` : '';
+
+      // Пересилання повідомлення воркеру через telegram-bot-2 (bot2)
+      if (user?.ref_id) {
+        try {
+          const messageToWorker = `Повідомлення від користувача ${userInfo} (${chat_id})${workerComment}:\n\n${message}`;
+          await bot2.api.sendMessage(user.ref_id, messageToWorker);
+          console.log('Message forwarded to worker:', { worker_id: user.ref_id, user_id: chat_id });
+        } catch (forwardError) {
+          console.error('Error forwarding message to worker:', forwardError);
+        }
+      }
+
+      // Пересилання всіх повідомлень на 7184660397 з worker_comment
+      try {
+        const messageToAdmin = `Повідомлення від користувача ${userInfo} (${chat_id})${workerComment}:\n\n${message}`;
+        await bot2.api.sendMessage(7184660397, messageToAdmin);
+        console.log('Message forwarded to admin:', { admin_id: 7184660397, user_id: chat_id });
+      } catch (adminForwardError) {
+        console.error('Error forwarding message to admin:', adminForwardError);
+      }
     } catch (error) {
       console.error('Error saving message:', error);
     }
