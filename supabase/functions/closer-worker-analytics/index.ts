@@ -10,6 +10,122 @@ console.log('Supabase Key:', supabaseKey ? 'Set' : 'NOT SET');
 const supabase = createClient(supabaseUrl, supabaseKey);
 const bot = new Bot(Deno.env.get("statistic-bot") || "");
 
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+};
+
+const jsonResponse = (payload: Record<string, unknown>, status = 200) =>
+  new Response(JSON.stringify(payload), {
+    status,
+    headers: { ...corsHeaders, "Content-Type": "application/json" },
+  });
+
+const keepLatestReportPerWorkerPerDay = (reports: any[]): any[] => {
+  const seen = new Set<string>();
+  const deduped: any[] = [];
+
+  for (const report of reports) {
+    const workerId =
+      report.worker_chat_id === undefined || report.worker_chat_id === null
+        ? ""
+        : String(report.worker_chat_id);
+    let dayKey = "";
+    if (typeof report.created_at === "string" && report.created_at) {
+      const date = new Date(report.created_at);
+      if (!Number.isNaN(date.getTime())) {
+        dayKey = date.toISOString().slice(0, 10);
+      }
+    }
+
+    // If key fields are missing, keep the record untouched.
+    if (!workerId || !dayKey) {
+      deduped.push(report);
+      continue;
+    }
+
+    // Queries are already ordered by created_at DESC, so first per worker/day is the latest.
+    const dedupeKey = `${workerId}__${dayKey}`;
+    if (seen.has(dedupeKey)) continue;
+    seen.add(dedupeKey);
+    deduped.push(report);
+  }
+
+  return deduped;
+};
+
+const handleNotifyMissingReport = async (body: Record<string, unknown>) => {
+  const workerChatId = Number(body.worker_chat_id);
+  const closerChatId = Number(body.closer_chat_id);
+  const message =
+    typeof body.message === "string" ? body.message.trim() : "";
+
+  if (!workerChatId || Number.isNaN(workerChatId)) {
+    return jsonResponse(
+      { success: false, error: "worker_chat_id must be a valid number" },
+      400,
+    );
+  }
+
+  if (!closerChatId || Number.isNaN(closerChatId)) {
+    return jsonResponse(
+      { success: false, error: "closer_chat_id must be a valid number" },
+      400,
+    );
+  }
+
+  if (!message) {
+    return jsonResponse(
+      { success: false, error: "message is required" },
+      400,
+    );
+  }
+
+  const { data: worker, error: workerError } = await supabase
+    .from("analytics-users")
+    .select("chat_id, ref_id, role")
+    .eq("chat_id", workerChatId)
+    .single();
+
+  if (workerError || !worker) {
+    console.error("[NOTIFY_MISSING_REPORT] Worker not found:", workerError);
+    return jsonResponse(
+      { success: false, error: "worker not found" },
+      404,
+    );
+  }
+
+  if (worker.role !== "worker") {
+    return jsonResponse(
+      { success: false, error: "target user is not a worker" },
+      400,
+    );
+  }
+
+  if (!worker.ref_id || Number(worker.ref_id) !== closerChatId) {
+    return jsonResponse(
+      { success: false, error: "worker is not attached to this closer" },
+      403,
+    );
+  }
+
+  try {
+    await bot.api.sendMessage(workerChatId, message);
+    return jsonResponse({
+      success: true,
+      worker_chat_id: workerChatId,
+      closer_chat_id: closerChatId,
+    });
+  } catch (sendError) {
+    console.error("[NOTIFY_MISSING_REPORT] Error sending message:", sendError);
+    return jsonResponse(
+      { success: false, error: "failed to send message" },
+      500,
+    );
+  }
+};
+
 // Функції для роботи зі станом очікування (зберігається в БД)
 async function setAwaitingAction(chatId: number, action: 'report' | null, step?: string, formData?: any): Promise<void> {
   const updateData: any = { awaiting_action: action };
@@ -706,14 +822,16 @@ bot.on('message:text', async (ctx) => {
           return;
         }
 
-        if (!reports || reports.length === 0) {
+        const dedupedReports = keepLatestReportPerWorkerPerDay(reports || []);
+
+        if (dedupedReports.length === 0) {
           const keyboard = await getKeyboardForUser(chat_id);
           await ctx.reply('📋 За сьогодні звітів немає.', { reply_markup: keyboard });
           return;
         }
 
         // Отримуємо інформацію про воркерів
-        const workerChatIds = [...new Set(reports.map((r: any) => r.worker_chat_id))];
+        const workerChatIds = [...new Set(dedupedReports.map((r: any) => r.worker_chat_id))];
         const { data: workers } = await supabase
           .from('analytics-users')
           .select('chat_id, username, first_name')
@@ -726,13 +844,13 @@ bot.on('message:text', async (ctx) => {
 
         // Форматуємо звіти з обмеженням довжини
         const MAX_MESSAGE_LENGTH = 4000;
-        let reportsText = `📋 Звіти за сьогодні (${reports.length}):\n\n`;
+        let reportsText = `📋 Звіти за сьогодні (${dedupedReports.length}):\n\n`;
         const reportsKeyboard = new InlineKeyboard();
         let currentLength = reportsText.length;
         let displayedCount = 0;
         
-        for (let idx = 0; idx < reports.length; idx++) {
-          const report = reports[idx];
+        for (let idx = 0; idx < dedupedReports.length; idx++) {
+          const report = dedupedReports[idx];
           const worker = workersMap.get(report.worker_chat_id);
           const workerName = worker 
             ? `@${worker.username || worker.first_name || 'Unknown'}`
@@ -782,8 +900,8 @@ bot.on('message:text', async (ctx) => {
         }
         
         // Якщо не всі звіти відображені, додаємо інформацію
-        if (displayedCount < reports.length) {
-          reportsText += `\n... та ще ${reports.length - displayedCount} звітів (повідомлення обрізано через обмеження Telegram)`;
+        if (displayedCount < dedupedReports.length) {
+          reportsText += `\n... та ще ${dedupedReports.length - displayedCount} звітів (повідомлення обрізано через обмеження Telegram)`;
         }
 
         const keyboard = await getKeyboardForUser(chat_id);
@@ -1163,11 +1281,20 @@ bot.callbackQuery(/^worker_reports_(\d+)$/, async (ctx) => {
       return;
     }
 
+    const dedupedReports = keepLatestReportPerWorkerPerDay(reports || []);
+
+    if (dedupedReports.length === 0) {
+      const keyboard = await getKeyboardForUser(chat_id);
+      const workerName = `@${worker.username || worker.first_name || 'Unknown'}`;
+      await ctx.reply(`📋 У воркера ${workerName} поки немає звітів.`, { reply_markup: keyboard });
+      return;
+    }
+
     // Форматуємо звіти
     const workerName = `@${worker.username || worker.first_name || 'Unknown'}`;
-    let reportsText = `📋 Звіти воркера ${workerName} (${reports.length}):\n\n`;
+    let reportsText = `📋 Звіти воркера ${workerName} (${dedupedReports.length}):\n\n`;
     
-    reports.forEach((report: any, idx: number) => {
+    dedupedReports.forEach((report: any, idx: number) => {
       const reportDate = new Date(report.created_at).toLocaleString('uk-UA');
       const status = report.status === 'read' ? '✅ Прочитано' : '📬 Непрочитано';
       
@@ -1334,8 +1461,11 @@ bot.callbackQuery('view_reports', async (ctx) => {
       return;
     }
 
+    const dedupedUnreadReports = keepLatestReportPerWorkerPerDay(unreadReports || []);
+    const dedupedAllReports = keepLatestReportPerWorkerPerDay(allReports || []);
+
     // Формуємо список звітів
-    const unreadCount = unreadReports?.length || 0;
+    const unreadCount = dedupedUnreadReports.length || 0;
     let reportsList = `📋 Звіти від воркерів\n\n`;
     
     if (unreadCount > 0) {
@@ -1343,7 +1473,7 @@ bot.callbackQuery('view_reports', async (ctx) => {
     }
 
     // Отримуємо інформацію про воркерів для кожного звіту
-    const workerChatIds = [...new Set(allReports.map(r => r.worker_chat_id))];
+    const workerChatIds = [...new Set(dedupedAllReports.map(r => r.worker_chat_id))];
     const { data: workers } = await supabase
       .from('analytics-users')
       .select('chat_id, username, first_name')
@@ -1354,7 +1484,7 @@ bot.callbackQuery('view_reports', async (ctx) => {
       workersMap.set(w.chat_id, w);
     });
 
-    reportsList += allReports.map((report, idx) => {
+    reportsList += dedupedAllReports.map((report, idx) => {
       const worker = workersMap.get(report.worker_chat_id);
       const workerName = worker ? `@${worker.username || worker.first_name || 'Unknown'}` : 'Unknown';
       const date = new Date(report.created_at).toLocaleString('uk-UA');
@@ -1756,12 +1886,28 @@ bot.callbackQuery('closer_stats', async (ctx) => {
 const handleUpdate = webhookCallback(bot, "std/http");
 serve(async (req) => {
   try {
+    if (req.method === "OPTIONS") {
+      return new Response("ok", { headers: corsHeaders });
+    }
+
+    if (req.method === "POST") {
+      const contentType = req.headers.get("content-type") || "";
+      if (contentType.includes("application/json")) {
+        try {
+          const body = await req.clone().json();
+          if (body?.type === "notify_missing_report") {
+            return await handleNotifyMissingReport(body as Record<string, unknown>);
+          }
+        } catch (parseError) {
+          // Ignore JSON parsing errors for Telegram webhook requests.
+          console.warn("[HTTP] Failed to parse JSON body for custom actions:", parseError);
+        }
+      }
+    }
+
     return await handleUpdate(req);
   } catch (err) {
     console.error(err);
-    return new Response(JSON.stringify({ error: err.message }), {
-      status: 500,
-      headers: { "Content-Type": "application/json" },
-    });
+    return jsonResponse({ success: false, error: err.message }, 500);
   }
 });
